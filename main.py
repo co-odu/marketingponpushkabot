@@ -20,8 +20,8 @@ from telegram.ext import (
 # КОНФИГУРАЦИЯ
 # ─────────────────────────────────────────────
 
-BOT_TOKEN = "ВСТАВЬ_ТОКЕН_ОТ_BOTFATHER"
-ADMIN_ID = 123456789  # Telegram ID руководителя отдела маркетинга (узнать у @userinfobot)
+BOT_TOKEN = "8878511511:AAEEqOkNBvwFrtTGpg17qBUFn2jlGthZAoE"
+ADMIN_ID = 6235378997  # Telegram ID руководителя отдела маркетинга (узнать у @userinfobot)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
