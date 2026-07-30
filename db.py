@@ -20,7 +20,7 @@ def get_conn():
 
 
 def init_db() -> None:
-    """Создаёт таблицу заявок, если её ещё нет"""
+    """Создаёт таблицы, если их ещё нет"""
     with get_conn() as conn:
         conn.execute(
             """
@@ -40,6 +40,19 @@ def init_db() -> None:
                 admin_chat_id   INTEGER,
                 admin_message_id INTEGER,
                 created_at      TEXT
+            )
+            """
+        )
+        # Заявка теперь может быть отправлена НЕСКОЛЬКИМ админам одновременно —
+        # тут храним по одной строке на каждое такое сообщение, чтобы потом
+        # можно было обновить/отредактировать все разом.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_messages (
+                request_id  TEXT NOT NULL,
+                chat_id     INTEGER NOT NULL,
+                message_id  INTEGER NOT NULL,
+                PRIMARY KEY (request_id, chat_id)
             )
             """
         )
@@ -83,11 +96,32 @@ def create_request(
 
 
 def set_admin_message(request_id: str, admin_chat_id: int, admin_message_id: int) -> None:
+    """Оставлено для обратной совместимости — пишет в основную таблицу первое сообщение."""
     with get_conn() as conn:
         conn.execute(
             "UPDATE requests SET admin_chat_id = ?, admin_message_id = ? WHERE request_id = ?",
             (admin_chat_id, admin_message_id, request_id),
         )
+
+
+def add_admin_message(request_id: str, chat_id: int, message_id: int) -> None:
+    """Регистрирует ещё одно сообщение у конкретного админа для этой заявки
+    (используется, когда заявка/карточка разослана нескольким админам)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO admin_messages (request_id, chat_id, message_id) VALUES (?, ?, ?)",
+            (request_id, chat_id, message_id),
+        )
+
+
+def get_admin_messages(request_id: str) -> list[sqlite3.Row]:
+    """Возвращает все сообщения у админов, связанные с этой заявкой"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT chat_id, message_id FROM admin_messages WHERE request_id = ?",
+            (request_id,),
+        )
+        return cur.fetchall()
 
 
 def set_status(request_id: str, status: str, reason: Optional[str] = None) -> None:
@@ -115,5 +149,14 @@ def get_requests_by_user(user_id: int) -> list[sqlite3.Row]:
         cur = conn.execute(
             "SELECT * FROM requests WHERE user_id = ? ORDER BY created_at DESC",
             (user_id,),
+        )
+        return cur.fetchall()
+
+
+def get_requests_by_status(status: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM requests WHERE status = ? ORDER BY created_at DESC",
+            (status,),
         )
         return cur.fetchall()
