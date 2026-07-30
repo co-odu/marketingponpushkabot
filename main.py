@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -68,6 +69,16 @@ MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+BACK_TEXT = "◀️ Назад"
+BACK_CALLBACK = "nav_back"
+
+# Постоянная клавиатура с кнопкой "Назад" — показывается на всех шагах заявки,
+# заменяя собой главное меню, пока идёт заполнение
+BACK_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton(BACK_TEXT)]],
+    resize_keyboard=True,
+)
+
 # ─────────────────────────────────────────────
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ─────────────────────────────────────────────
@@ -112,13 +123,121 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def start_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Запускает диалог сбора новой заявки (вызывается из /start и из кнопки меню)"""
     context.user_data.clear()  # чистим данные предыдущей заявки
-
-    await update.message.reply_text(
-        "📝 <b>Шаг 1 из 6</b>\n"
-        "Введи <b>название юридического лица</b> (организации):",
-        parse_mode="HTML",
-    )
+    await prompt_company(update.effective_chat.id, context)
     return COMPANY_NAME
+
+
+# ─────────────────────────────────────────────
+# ФУНКЦИИ ОТПРАВКИ ШАГОВ (переиспользуются и вперёд, и назад)
+# ─────────────────────────────────────────────
+
+async def prompt_company(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "📝 <b>Шаг 1 из 6</b>\n"
+            "Введи <b>название юридического лица</b> (организации):"
+        ),
+        parse_mode="HTML",
+        reply_markup=BACK_KEYBOARD,
+    )
+
+
+async def prompt_object(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "📝 <b>Шаг 2 из 6</b>\n"
+            "Введи <b>название объекта, город и адрес</b>:\n"
+            "<i>Например: ТЦ Мега, Москва, ул. Ленина 1</i>"
+        ),
+        parse_mode="HTML",
+        reply_markup=BACK_KEYBOARD,
+    )
+
+
+async def prompt_tech_task(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "📝 <b>Шаг 3 из 6</b>\n"
+            "Опиши <b>техническое задание</b> — что должно быть на макете:\n"
+            "<i>Например: баннер 3x6м, логотип компании, слоган, фон синий...</i>"
+        ),
+        parse_mode="HTML",
+        reply_markup=BACK_KEYBOARD,
+    )
+
+
+async def prompt_print_type(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = [
+        [InlineKeyboardButton("🖨 Печать", callback_data="print")],
+        [InlineKeyboardButton("💻 Диджитал", callback_data="digital")],
+        [InlineKeyboardButton(BACK_TEXT, callback_data=BACK_CALLBACK)],
+    ]
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="📝 <b>Шаг 4 из 6</b>\nВыбери <b>тип макета</b>:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def prompt_size(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print_type = context.user_data.get("print_type", "")
+    prefix = f"Тип: <b>{print_type}</b>\n\n" if print_type else ""
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"{prefix}"
+            "📝 <b>Шаг 5 из 6</b>\n"
+            "Укажи <b>размер макета</b>:\n"
+            "<i>Например: 3x6 метра, A4, 1920x1080 px...</i>"
+        ),
+        parse_mode="HTML",
+        reply_markup=BACK_KEYBOARD,
+    )
+
+
+async def prompt_deadline_confirm(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    normal_deadline = context.user_data["normal_deadline"]
+    keyboard = [
+        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_deadline")],
+        [InlineKeyboardButton(BACK_TEXT, callback_data=BACK_CALLBACK)],
+    ]
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📅 <b>Стандартный дедлайн</b> (+10 раб.дней):\n"
+            f"<b>{format_date_ru(normal_deadline)}</b>\n\n"
+            f"📝 <b>Шаг 6 из 6</b>\n"
+            f"Нажми «Подтвердить» для выбора типа выполнения:"
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def prompt_urgent_choice(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    normal = format_date_ru(context.user_data["normal_deadline"])
+    urgent = format_date_ru(context.user_data["urgent_deadline"])
+
+    keyboard = [
+        [InlineKeyboardButton(f"🐢 Обычный (до {normal})", callback_data="normal")],
+        [InlineKeyboardButton(f"🚀 Ускоренный +100₽ (до {urgent})", callback_data="urgent")],
+        [InlineKeyboardButton(BACK_TEXT, callback_data=BACK_CALLBACK)],
+    ]
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"⏰ <b>Выбери тип выполнения:</b>\n\n"
+            f"🐢 <b>Обычный</b> — готовность <b>{normal}</b>\n"
+            f"🚀 <b>Ускоренный</b> — готовность <b>{urgent}</b> (+100 ₽)"
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def show_my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,52 +283,38 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def get_company_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получаем название юр.лица"""
-    context.user_data["company"] = update.message.text.strip()
+    if update.message.text == BACK_TEXT:
+        await update.message.reply_text(
+            "Хорошо, отменил подачу заявки.",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return ConversationHandler.END
 
-    await update.message.reply_text(
-        "✅ Принято!\n\n"
-        "📝 <b>Шаг 2 из 6</b>\n"
-        "Введи <b>название объекта, город и адрес</b>:\n"
-        "<i>Например: ТЦ Мега, Москва, ул. Ленина 1</i>",
-        parse_mode="HTML"
-    )
+    context.user_data["company"] = update.message.text.strip()
+    await prompt_object(update.effective_chat.id, context)
     return OBJECT_NAME
 
 
 async def get_object_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получаем объект, город, адрес"""
+    if update.message.text == BACK_TEXT:
+        await prompt_company(update.effective_chat.id, context)
+        return COMPANY_NAME
+
     context.user_data["object"] = update.message.text.strip()
-
-    # Автоматически ставим дату постановки задачи
-    context.user_data["task_date"] = datetime.now()
-
-    await update.message.reply_text(
-        f"✅ Принято!\n"
-        f"📅 Дата постановки задачи: <b>{format_date_ru(datetime.now())}</b>\n\n"
-        f"📝 <b>Шаг 3 из 6</b>\n"
-        f"Опиши <b>техническое задание</b> — что должно быть на макете:\n"
-        f"<i>Например: баннер 3x6м, логотип компании, слоган, фон синий...</i>",
-        parse_mode="HTML"
-    )
+    context.user_data["task_date"] = datetime.now()  # дата постановки задачи
+    await prompt_tech_task(update.effective_chat.id, context)
     return TECH_TASK
 
 
 async def get_tech_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получаем ТЗ"""
+    if update.message.text == BACK_TEXT:
+        await prompt_object(update.effective_chat.id, context)
+        return OBJECT_NAME
+
     context.user_data["tech_task"] = update.message.text.strip()
-
-    keyboard = [
-        [InlineKeyboardButton("🖨 Печать", callback_data="print")],
-        [InlineKeyboardButton("💻 Диджитал", callback_data="digital")],
-    ]
-
-    await update.message.reply_text(
-        "✅ Принято!\n\n"
-        "📝 <b>Шаг 4 из 6</b>\n"
-        "Выбери <b>тип макета</b>:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await prompt_print_type(update.effective_chat.id, context)
     return PRINT_TYPE
 
 
@@ -218,42 +323,40 @@ async def get_print_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
 
+    if query.data == BACK_CALLBACK:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await prompt_tech_task(update.effective_chat.id, context)
+        return TECH_TASK
+
     context.user_data["print_type"] = "Печать" if query.data == "print" else "Диджитал"
 
     await query.edit_message_text(
-        f"✅ Тип: <b>{context.user_data['print_type']}</b>\n\n"
-        f"📝 <b>Шаг 5 из 6</b>\n"
-        f"Укажи <b>размер макета</b>:\n"
-        f"<i>Например: 3x6 метра, A4, 1920x1080 px...</i>",
-        parse_mode="HTML"
+        f"✅ Тип: <b>{context.user_data['print_type']}</b>",
+        parse_mode="HTML",
     )
+    await prompt_size(update.effective_chat.id, context)
     return SIZE
+
+
+async def back_from_print_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Нажата reply-кнопка 'Назад' на шаге выбора типа макета"""
+    await prompt_tech_task(update.effective_chat.id, context)
+    return TECH_TASK
 
 
 async def get_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получаем размер"""
+    if update.message.text == BACK_TEXT:
+        await prompt_print_type(update.effective_chat.id, context)
+        return PRINT_TYPE
+
     context.user_data["size"] = update.message.text.strip()
 
     task_date = context.user_data["task_date"]
-    normal_deadline = get_working_days_later(task_date, 10)
-    urgent_deadline = get_working_days_later(task_date, 2)
+    context.user_data["normal_deadline"] = get_working_days_later(task_date, 10)
+    context.user_data["urgent_deadline"] = get_working_days_later(task_date, 2)
 
-    context.user_data["normal_deadline"] = normal_deadline
-    context.user_data["urgent_deadline"] = urgent_deadline
-
-    keyboard = [
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_deadline")],
-    ]
-
-    await update.message.reply_text(
-        f"✅ Размер: <b>{context.user_data['size']}</b>\n\n"
-        f"📅 <b>Стандартный дедлайн</b> (+10 раб.дней):\n"
-        f"<b>{format_date_ru(normal_deadline)}</b>\n\n"
-        f"📝 <b>Шаг 6 из 6</b>\n"
-        f"Нажми «Подтвердить» для выбора типа выполнения:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await prompt_deadline_confirm(update.effective_chat.id, context)
     return DEADLINE_CONFIRM
 
 
@@ -262,29 +365,31 @@ async def confirm_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
 
-    normal = format_date_ru(context.user_data["normal_deadline"])
-    urgent = format_date_ru(context.user_data["urgent_deadline"])
+    if query.data == BACK_CALLBACK:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await prompt_size(update.effective_chat.id, context)
+        return SIZE
 
-    keyboard = [
-        [InlineKeyboardButton(f"🐢 Обычный (до {normal})", callback_data="normal")],
-        [InlineKeyboardButton(f"🚀 Ускоренный +100₽ (до {urgent})", callback_data="urgent")],
-    ]
-
-    await query.edit_message_text(
-        f"⏰ <b>Выбери тип выполнения:</b>\n\n"
-        f"🐢 <b>Обычный</b> — готовность <b>{normal}</b>\n"
-        f"🚀 <b>Ускоренный</b> — готовность <b>{urgent}</b> (+100 ₽)\n\n"
-        f"Выбери вариант:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.edit_message_reply_markup(reply_markup=None)
+    await prompt_urgent_choice(update.effective_chat.id, context)
     return URGENT_CHOICE
+
+
+async def back_from_deadline_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Нажата reply-кнопка 'Назад' на шаге подтверждения дедлайна"""
+    await prompt_size(update.effective_chat.id, context)
+    return SIZE
 
 
 async def process_urgent_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора обычный/ускоренный → финализация заявки"""
     query = update.callback_query
     await query.answer()
+
+    if query.data == BACK_CALLBACK:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await prompt_deadline_confirm(update.effective_chat.id, context)
+        return DEADLINE_CONFIRM
 
     is_urgent = query.data == "urgent"
     context.user_data["is_urgent"] = is_urgent
@@ -340,6 +445,12 @@ async def process_urgent_choice(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     return ConversationHandler.END
+
+
+async def back_from_urgent_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Нажата reply-кнопка 'Назад' на шаге выбора обычный/ускоренный"""
+    await prompt_deadline_confirm(update.effective_chat.id, context)
+    return DEADLINE_CONFIRM
 
 
 async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: str) -> None:
@@ -638,10 +749,19 @@ def main() -> None:
             COMPANY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_company_name)],
             OBJECT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_object_name)],
             TECH_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_tech_task)],
-            PRINT_TYPE: [CallbackQueryHandler(get_print_type, pattern="^(print|digital)$")],
+            PRINT_TYPE: [
+                CallbackQueryHandler(get_print_type, pattern=f"^(print|digital|{BACK_CALLBACK})$"),
+                MessageHandler(filters.Regex(f"^{re.escape(BACK_TEXT)}$"), back_from_print_type),
+            ],
             SIZE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_size)],
-            DEADLINE_CONFIRM: [CallbackQueryHandler(confirm_deadline, pattern="^confirm_deadline$")],
-            URGENT_CHOICE: [CallbackQueryHandler(process_urgent_choice, pattern="^(normal|urgent)$")],
+            DEADLINE_CONFIRM: [
+                CallbackQueryHandler(confirm_deadline, pattern=f"^(confirm_deadline|{BACK_CALLBACK})$"),
+                MessageHandler(filters.Regex(f"^{re.escape(BACK_TEXT)}$"), back_from_deadline_confirm),
+            ],
+            URGENT_CHOICE: [
+                CallbackQueryHandler(process_urgent_choice, pattern=f"^(normal|urgent|{BACK_CALLBACK})$"),
+                MessageHandler(filters.Regex(f"^{re.escape(BACK_TEXT)}$"), back_from_urgent_choice),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
