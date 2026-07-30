@@ -1,7 +1,6 @@
-# bot.py — Бот для сбора заявок на макеты (v3)
+# bot.py — Бот для сбора заявок на макеты (v4)
 
 import logging
-import os
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -24,7 +23,7 @@ import db
 # ─────────────────────────────────────────────
 
 BOT_TOKEN = "8878511511:AAEEqOkNBvwFrtTGpg17qBUFn2jlGthZAoE"
-ADMIN_IDS = [6235378997, 111111111] # Telegram ID руководителя отдела маркетинга (узнать у @userinfobot)
+ADMIN_IDS = [6235378997, 111111111]  # ID всех, кто принимает решения по заявкам (узнать у @userinfobot)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# ХРАНЕНИЕ ЗАЯВОК — теперь в SQLite (см. db.py), переживает перезапуск бота
+# ХРАНЕНИЕ ЗАЯВОК — в SQLite (см. db.py), переживает перезапуск бота
 # ─────────────────────────────────────────────
 
 STATUS_LABELS = {
@@ -103,6 +102,57 @@ def generate_request_id() -> str:
     """Генерирует ID заявки"""
     return f"REQ-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+def build_admin_card_text(req) -> str:
+    """Единый текст карточки заявки для админов — используется и при рассылке
+    новой заявки, и при показе карточки из списка «В работе»"""
+    task_date = datetime.fromisoformat(req["task_date"])
+    lines = [
+        f"🆕 <b>ЗАЯВКА #{req['request_id']}</b>",
+        "━" * 30,
+        f"🆔 <b>ID заказчика:</b> <code>{req['user_id']}</code>",
+        f"🏢 <b>Юр.лицо:</b> {req['company']}",
+        f"📍 <b>Объект:</b> {req['object']}",
+        f"📅 <b>Дата постановки:</b> {format_date_ru(task_date)}",
+        f"📝 <b>ТЗ:</b> {req['tech_task']}",
+        f"🖨 <b>Тип:</b> {req['print_type']}",
+        f"📐 <b>Размер:</b> {req['size']}",
+        f"⏰ <b>Дедлайн:</b> {req['deadline_str']}",
+        f"🚀 <b>Ускоренный:</b> {'Да (+100 BYN)' if req['is_urgent'] else 'Нет'}",
+        "━" * 30,
+        f"Статус: {STATUS_LABELS.get(req['status'], req['status'])}",
+    ]
+    if req["status"] == "rejected" and req["reason"]:
+        lines.append(f"Причина: {req['reason']}")
+    return "\n".join(lines)
+
+def in_progress_action_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    """Кнопки действий для заявки, которая уже в работе (используется и в
+    уведомлении, и в карточке из списка «В работе»)"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🏁 Выполнено", callback_data=f"complete_{request_id}"),
+            InlineKeyboardButton("❌ Отклонено", callback_data=f"reject_{request_id}"),
+        ],
+    ])
+
+async def update_all_admin_messages(context: ContextTypes.DEFAULT_TYPE, request_id: str, text: str,
+                                     reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
+    """Обновляет карточку заявки во всех чатах админов, куда она была разослана"""
+    for row in db.get_admin_messages(request_id):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=row["chat_id"],
+                message_id=row["message_id"],
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.error(f"Не удалось обновить сообщение админа {row['chat_id']}: {e}")
+
 # ─────────────────────────────────────────────
 # КОМАНДЫ
 # ─────────────────────────────────────────────
@@ -113,7 +163,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
-        "Я бот для подачи заявок в отдел маркетинга компании PON-PUSHKA. ",
+        "Я бот для подачи заявок в отдел маркетинга компании PON-PUSHKA.",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -434,12 +484,13 @@ async def process_urgent_choice(update: Update, context: ContextTypes.DEFAULT_TY
         is_urgent=is_urgent,
     )
 
-    # ── ОТПРАВЛЯЕМ ЗАЯВКУ АДМИНУ ──
-    await send_to_admin(update, context, request_id)
+    # ── ОТПРАВЛЯЕМ ЗАЯВКУ ВСЕМ АДМИНАМ ──
+    await send_to_admins(context, request_id)
 
-    # Показываем меню заказчику снова
+    # Показываем меню заказчику снова — теперь, когда заявка реально подана
     await context.bot.send_message(
         chat_id=update.effective_user.id,
+        text="Что дальше?",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -452,47 +503,27 @@ async def back_from_urgent_choice(update: Update, context: ContextTypes.DEFAULT_
     return DEADLINE_CONFIRM
 
 
-async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: str) -> None:
-    """Отправляет заявку админу с кнопками управления"""
-    bot = context.bot
-    data = context.user_data
+async def send_to_admins(context: ContextTypes.DEFAULT_TYPE, request_id: str) -> None:
+    """Рассылает новую заявку ВСЕМ админам из ADMIN_IDS с кнопками управления"""
+    req = db.get_request(request_id)
+    text = build_admin_card_text(req)
 
-    deadline = data["urgent_deadline"] if data["is_urgent"] else data["normal_deadline"]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Принято в работу", callback_data=f"accept_{request_id}")],
+        [InlineKeyboardButton("❌ Отклонено", callback_data=f"reject_{request_id}")],
+    ])
 
-    admin_text = (
-        f"🆕 <b>НОВАЯ ЗАЯВКА #{request_id}</b>\n"
-        f"{'━' * 30}\n"
-        f"👤 <b>От:</b> {update.effective_user.full_name} "
-        f"(@{update.effective_user.username or 'нет username'})\n"
-        f"🆔 <b>ID заказчика:</b> <code>{update.effective_user.id}</code>\n\n"
-        f"🏢 <b>Юр.лицо:</b> {data['company']}\n"
-        f"📍 <b>Объект:</b> {data['object']}\n"
-        f"📅 <b>Дата постановки:</b> {format_date_ru(data['task_date'])}\n"
-        f"📝 <b>ТЗ:</b> {data['tech_task']}\n"
-        f"🖨 <b>Тип:</b> {data['print_type']}\n"
-        f"📐 <b>Размер:</b> {data['size']}\n"
-        f"⏰ <b>Дедлайн:</b> {format_date_ru(deadline)}\n"
-        f"🚀 <b>Ускоренный:</b> {'Да (+100 ₽)' if data['is_urgent'] else 'Нет'}\n"
-        f"{'━' * 30}"
-    )
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Принято в работу", callback_data=f"accept_{request_id}"),
-        ],
-        [
-            InlineKeyboardButton("❌ Отклонено", callback_data=f"reject_{request_id}"),
-        ],
-    ]
-
-    msg = await bot.send_message(
-        chat_id=ADMIN_ID,
-        text=admin_text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-    db.set_admin_message(request_id, msg.chat_id, msg.message_id)
+    for admin_id in ADMIN_IDS:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            db.add_admin_message(request_id, msg.chat_id, msg.message_id)
+        except Exception as e:
+            logger.error(f"Не удалось отправить заявку админу {admin_id}: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -500,7 +531,7 @@ async def send_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, requ
 # ─────────────────────────────────────────────
 
 async def admin_accept(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Админ нажал 'Принято в работу'"""
+    """Кто-то из админов нажал 'Принято в работу'"""
     query = update.callback_query
     await query.answer()
 
@@ -510,20 +541,17 @@ async def admin_accept(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text("⚠️ Заявка не найдена.")
         return
 
+    if req["status"] != "pending":
+        await query.answer("Заявку уже обработал(а) другой сотрудник.", show_alert=True)
+        return
+
     db.set_status(request_id, "in_progress")
+    req = db.get_request(request_id)  # перечитываем со свежим статусом
 
-    keyboard = [
-        [InlineKeyboardButton("✅ В работе", callback_data="noop")],
-        [
-            InlineKeyboardButton("🏁 Выполнено", callback_data=f"complete_{request_id}"),
-            InlineKeyboardButton("❌ Отклонено", callback_data=f"reject_{request_id}"),
-        ],
-    ]
-
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.edit_message_text(
-        query.message.text + "\n\n✅ <b>Принято в работу</b>",
-        parse_mode="HTML"
+    # Обновляем карточку у ВСЕХ админов сразу (чтобы не получилось, что двое
+    # одновременно жмут разные кнопки на одной и той же заявке)
+    await update_all_admin_messages(
+        context, request_id, build_admin_card_text(req), in_progress_action_keyboard(request_id)
     )
 
     # ── Уведомляем заказчика ──
@@ -555,50 +583,128 @@ async def admin_complete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Помечаем, что от этого админа ждём файл макета для этой заявки
     context.bot_data.setdefault("awaiting_layout_file", {})[update.effective_user.id] = request_id
 
-    await query.edit_message_text(
-        query.message.text + "\n\n🏁 <b>Ожидается загрузка макета...</b>\n"
-        "Отправь файл макетом в ответ на это сообщение (или просто следующим сообщением).",
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            f"🏁 <b>Заявка #{request_id}</b>\n"
+            f"Пришли файл макетом следующим сообщением — перед отправкой заказчику "
+            f"я покажу его тебе на подтверждение."
+        ),
         parse_mode="HTML",
     )
 
 
 async def admin_receive_layout_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ловит файл/фото от админа, если он ожидается для конкретной заявки"""
+    """Ловит файл/фото от админа, если он ожидается для конкретной заявки.
+    Файл пока НЕ уходит заказчику — сначала просим подтверждение."""
+    admin_id = update.effective_user.id
     awaiting = context.bot_data.get("awaiting_layout_file", {})
-    request_id = awaiting.get(update.effective_user.id)
+    request_id = awaiting.get(admin_id)
     if not request_id:
         return  # админ просто прислал что-то не по делу — игнорируем
 
     req = db.get_request(request_id)
     if not req:
+        del awaiting[admin_id]
         return
 
-    db.set_status(request_id, "completed")
-    del awaiting[update.effective_user.id]
+    if update.message.document:
+        file_id = update.message.document.file_id
+        kind = "document"
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        kind = "photo"
+    else:
+        return  # не файл и не фото — не наш случай
 
-    await update.message.reply_text(f"✅ Макет по заявке #{request_id} отправлен заказчику.")
+    # Сохраняем файл во временное ожидание подтверждения (сам файл не скачиваем —
+    # достаточно file_id, Telegram хранит его на своей стороне)
+    context.bot_data.setdefault("pending_layout", {})[admin_id] = {
+        "request_id": request_id,
+        "file_id": file_id,
+        "kind": kind,
+    }
+    del awaiting[admin_id]
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Отправить заказчику", callback_data=f"send_layout_{request_id}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_layout_{request_id}"),
+        ],
+    ])
+
+    caption = (
+        f"Отправить этот макет по заявке <b>#{request_id}</b>?\n\n"
+        f"🏢 {req['company']}\n"
+        f"📍 {req['object']}\n"
+        f"🆔 Заказчик: <code>{req['user_id']}</code>"
+    )
+
+    if kind == "document":
+        await update.message.reply_document(document=file_id, caption=caption, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await update.message.reply_photo(photo=file_id, caption=caption, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def confirm_send_layout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ подтвердил отправку макета — теперь реально отправляем заказчику"""
+    query = update.callback_query
+    admin_id = update.effective_user.id
+
+    request_id = query.data.replace("send_layout_", "")
+    pending = context.bot_data.get("pending_layout", {}).get(admin_id)
+
+    if not pending or pending["request_id"] != request_id:
+        await query.answer("Этот файл уже обработан или устарел.", show_alert=True)
+        return
+
+    await query.answer()
+
+    req = db.get_request(request_id)
+    if not req:
+        await query.edit_message_caption(caption="⚠️ Заявка не найдена.")
+        del context.bot_data["pending_layout"][admin_id]
+        return
 
     caption = f"🏁 Твоя заявка <b>#{request_id}</b> выполнена! Макет во вложении."
 
     try:
-        if update.message.document:
+        if pending["kind"] == "document":
             await context.bot.send_document(
-                chat_id=req["user_id"],
-                document=update.message.document.file_id,
-                caption=caption,
-                parse_mode="HTML",
-            )
-        elif update.message.photo:
-            await context.bot.send_photo(
-                chat_id=req["user_id"],
-                photo=update.message.photo[-1].file_id,
-                caption=caption,
-                parse_mode="HTML",
+                chat_id=req["user_id"], document=pending["file_id"], caption=caption, parse_mode="HTML",
             )
         else:
-            await context.bot.send_message(chat_id=req["user_id"], text=caption, parse_mode="HTML")
+            await context.bot.send_photo(
+                chat_id=req["user_id"], photo=pending["file_id"], caption=caption, parse_mode="HTML",
+            )
+        db.set_status(request_id, "completed")
+        req = db.get_request(request_id)
+        await update_all_admin_messages(context, request_id, build_admin_card_text(req))
+        await query.edit_message_caption(caption=f"✅ Макет по заявке #{request_id} отправлен заказчику.")
     except Exception as e:
         logger.error(f"Не удалось отправить макет заказчику {req['user_id']}: {e}")
+        await query.edit_message_caption(caption=f"⚠️ Не удалось отправить макет: {e}")
+
+    del context.bot_data["pending_layout"][admin_id]
+
+
+async def cancel_send_layout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ передумал — файл никуда не уходит, можно прислать другой"""
+    query = update.callback_query
+    admin_id = update.effective_user.id
+
+    request_id = query.data.replace("cancel_layout_", "")
+    pending = context.bot_data.get("pending_layout", {}).get(admin_id)
+
+    await query.answer()
+
+    if pending and pending["request_id"] == request_id:
+        del context.bot_data["pending_layout"][admin_id]
+
+    # Разрешаем сразу прислать другой файл без повторного нажатия "Выполнено"
+    context.bot_data.setdefault("awaiting_layout_file", {})[admin_id] = request_id
+
+    await query.edit_message_caption(caption="❌ Отменено. Пришли другой файл, когда будет готов.")
 
 
 async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -615,27 +721,30 @@ async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Помечаем, что от этого админа ждём текст причины для этой заявки
     context.bot_data.setdefault("awaiting_reject_reason", {})[update.effective_user.id] = request_id
 
-    await query.edit_message_text(
-        query.message.text + "\n\n❌ <b>Напиши причину отклонения следующим сообщением:</b>",
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"❌ <b>Заявка #{request_id}</b>\nНапиши причину отклонения следующим сообщением:",
         parse_mode="HTML",
     )
 
 
 async def admin_receive_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ловит текстовое сообщение от админа, если оно является причиной отклонения"""
+    admin_id = update.effective_user.id
     awaiting = context.bot_data.get("awaiting_reject_reason", {})
-    request_id = awaiting.get(update.effective_user.id)
+    request_id = awaiting.get(admin_id)
     if not request_id:
-        return  # это не причина отклонения — пропускаем (обработается другими хендлерами, если есть)
+        return  # это не причина отклонения — пропускаем
 
     req = db.get_request(request_id)
     if not req:
-        del awaiting[update.effective_user.id]
+        del awaiting[admin_id]
         return
 
     reason = update.message.text.strip()
     db.set_status(request_id, "rejected", reason=reason)
-    del awaiting[update.effective_user.id]
+    req = db.get_request(request_id)
+    del awaiting[admin_id]
 
     await update.message.reply_text(f"❌ Заявка #{request_id} отклонена. Причина отправлена заказчику.")
 
@@ -654,20 +763,8 @@ async def admin_receive_reject_reason(update: Update, context: ContextTypes.DEFA
     except Exception as e:
         logger.error(f"Не удалось уведомить заказчика {req['user_id']}: {e}")
 
-    # Обновляем сообщение у админа тоже
-    try:
-        await context.bot.edit_message_text(
-            chat_id=req["admin_chat_id"],
-            message_id=req["admin_message_id"],
-            text=(
-                f"🆕 <b>ЗАЯВКА #{request_id}</b>\n\n"
-                f"❌ <b>Отклонено</b>\n"
-                f"Причина: {reason}"
-            ),
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        logger.error(f"Не удалось обновить сообщение админа: {e}")
+    # Обновляем карточки у всех админов
+    await update_all_admin_messages(context, request_id, build_admin_card_text(req))
 
 
 async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -677,40 +774,75 @@ async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────
-# ОБЩИЙ РОУТЕР ТЕКСТОВЫХ СООБЩЕНИЙ ОТ АДМИНА
-# (вне ConversationHandler — реагирует на причину отклонения)
+# СПИСОК "В РАБОТЕ" (для админов)
+# ─────────────────────────────────────────────
+
+async def show_in_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает список заявок в статусе in_progress инлайн-кнопками"""
+    if not is_admin(update.effective_user.id):
+        return
+
+    requests = db.get_requests_by_status("in_progress")
+
+    if not requests:
+        await update.message.reply_text("Сейчас нет заявок в работе.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(f"#{r['request_id']} — {r['object']}", callback_data=f"view_{r['request_id']}")]
+        for r in requests
+    ]
+
+    await update.message.reply_text(
+        "📌 <b>Заявки в работе:</b>\nВыбери, чтобы открыть карточку и изменить статус.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def view_request_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Открывает полную карточку заявки из списка «В работе»"""
+    query = update.callback_query
+    await query.answer()
+
+    request_id = query.data.replace("view_", "")
+    req = db.get_request(request_id)
+    if not req:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Заявка не найдена.")
+        return
+
+    text = build_admin_card_text(req)
+
+    if req["status"] == "in_progress":
+        reply_markup = in_progress_action_keyboard(request_id)
+    else:
+        reply_markup = None  # заявка уже сменила статус, пока список не обновляли — просто показываем инфо
+
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=text, parse_mode="HTML", reply_markup=reply_markup,
+    )
+
+    # Регистрируем это сообщение тоже, чтобы оно обновлялось при смене статуса
+    db.add_admin_message(request_id, msg.chat_id, msg.message_id)
+
+
+# ─────────────────────────────────────────────
+# ОБЩИЙ РОУТЕР ТЕКСТОВЫХ СООБЩЕНИЙ / ФАЙЛОВ ОТ АДМИНОВ
+# (вне ConversationHandler — реагирует на причину отклонения и файл макета)
 # ─────────────────────────────────────────────
 
 async def admin_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Единая точка входа для текстовых сообщений от админа вне диалога заявки"""
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin(update.effective_user.id):
         return
     await admin_receive_reject_reason(update, context)
 
 
 async def admin_file_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Единая точка входа для файлов/фото от админа"""
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin(update.effective_user.id):
         return
     await admin_receive_layout_file(update, context)
-
-
-# ─────────────────────────────────────────────
-# ГЛАВНОЕ МЕНЮ (кнопки под полем ввода)
-# ─────────────────────────────────────────────
-
-async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
-    """Обрабатывает нажатия на кнопки главного меню (для не-админа)"""
-    text = update.message.text
-
-    if text == "📝 Подать заявку":
-        return await start_new_request(update, context)
-
-    if text == "📋 Мои заявки":
-        await show_my_requests(update, context)
-        return None
-
-    return None
 
 
 # ─────────────────────────────────────────────
@@ -738,11 +870,12 @@ def main() -> None:
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Диалог сбора заявки. Точки входа: /start и кнопка "Подать заявку"
+    # Диалог сбора заявки. Точки входа: /start и кнопка "Подать заявку".
+    # Админам эта ветка не нужна — исключаем их явно.
     conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("start", start),
-            MessageHandler(filters.Regex("^📝 Подать заявку$") & ~filters.User(user_id=ADMIN_ID), start_new_request),
+            CommandHandler("start", start, filters=~filters.User(user_id=ADMIN_IDS)),
+            MessageHandler(filters.Regex("^📝 Подать заявку$") & ~filters.User(user_id=ADMIN_IDS), start_new_request),
         ],
         states={
             COMPANY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_company_name)],
@@ -770,24 +903,31 @@ def main() -> None:
     # Кнопка "Мои заявки" (не-админ)
     application.add_handler(
         MessageHandler(
-            filters.Regex("^📋 Мои заявки$") & ~filters.User(user_id=ADMIN_ID),
+            filters.Regex("^📋 Мои заявки$") & ~filters.User(user_id=ADMIN_IDS),
             show_my_requests,
         )
     )
+
+    # /start и команда для админов — список "В работе"
+    application.add_handler(CommandHandler("start", lambda u, c: show_in_progress(u, c), filters=filters.User(user_id=ADMIN_IDS)))
+    application.add_handler(CommandHandler("inprogress", show_in_progress, filters=filters.User(user_id=ADMIN_IDS)))
+    application.add_handler(CallbackQueryHandler(view_request_card, pattern="^view_"))
 
     # Кнопки админа
     application.add_handler(CallbackQueryHandler(admin_accept, pattern="^accept_"))
     application.add_handler(CallbackQueryHandler(admin_complete, pattern="^complete_"))
     application.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
+    application.add_handler(CallbackQueryHandler(confirm_send_layout, pattern="^send_layout_"))
+    application.add_handler(CallbackQueryHandler(cancel_send_layout, pattern="^cancel_layout_"))
     application.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
 
     # Текст/файлы от админа вне диалога заявки (причина отклонения / файл макета)
     application.add_handler(
-        MessageHandler(filters.User(user_id=ADMIN_ID) & filters.TEXT & ~filters.COMMAND, admin_text_router)
+        MessageHandler(filters.User(user_id=ADMIN_IDS) & filters.TEXT & ~filters.COMMAND, admin_text_router)
     )
     application.add_handler(
         MessageHandler(
-            filters.User(user_id=ADMIN_ID) & (filters.Document.ALL | filters.PHOTO),
+            filters.User(user_id=ADMIN_IDS) & (filters.Document.ALL | filters.PHOTO),
             admin_file_router,
         )
     )
