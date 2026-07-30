@@ -24,7 +24,7 @@ import db
 # ─────────────────────────────────────────────
 
 BOT_TOKEN = "8878511511:AAEEqOkNBvwFrtTGpg17qBUFn2jlGthZAoE"
-ADMIN_ID = 6235378997  # Telegram ID руководителя отдела маркетинга (узнать у @userinfobot)
+ADMIN_IDS = [6235378997, 111111111] # Telegram ID руководителя отдела маркетинга (узнать у @userinfobot)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -113,7 +113,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
-        "Я бот для подачи заявок на изготовление макетов.",
+        "Я бот для подачи заявок в отдел маркетинга компании PON-PUSHKA. ",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -149,7 +149,7 @@ async def prompt_object(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> Non
         text=(
             "📝 <b>Шаг 2 из 6</b>\n"
             "Введи <b>название объекта, город и адрес</b>:\n"
-            "<i>Например: ТЦ Мега, Москва, ул. Ленина 1</i>"
+            "<i>Например: ТЦ Галилео, Минск, ул. Ленина 1</i>"
         ),
         parse_mode="HTML",
         reply_markup=BACK_KEYBOARD,
@@ -162,7 +162,7 @@ async def prompt_tech_task(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         text=(
             "📝 <b>Шаг 3 из 6</b>\n"
             "Опиши <b>техническое задание</b> — что должно быть на макете:\n"
-            "<i>Например: баннер 3x6м, логотип компании, слоган, фон синий...</i>"
+            "<i>Например: баннер, логотип компании, рекламный постер...</i>"
         ),
         parse_mode="HTML",
         reply_markup=BACK_KEYBOARD,
@@ -224,7 +224,7 @@ async def prompt_urgent_choice(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
 
     keyboard = [
         [InlineKeyboardButton(f"🐢 Обычный (до {normal})", callback_data="normal")],
-        [InlineKeyboardButton(f"🚀 Ускоренный +100₽ (до {urgent})", callback_data="urgent")],
+        [InlineKeyboardButton(f"🚀 Ускоренный +100 BYN (до {urgent})", callback_data="urgent")],
         [InlineKeyboardButton(BACK_TEXT, callback_data=BACK_CALLBACK)],
     ]
 
@@ -233,7 +233,7 @@ async def prompt_urgent_choice(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         text=(
             f"⏰ <b>Выбери тип выполнения:</b>\n\n"
             f"🐢 <b>Обычный</b> — готовность <b>{normal}</b>\n"
-            f"🚀 <b>Ускоренный</b> — готовность <b>{urgent}</b> (+100 ₽)"
+            f"🚀 <b>Ускоренный</b> — готовность <b>{urgent}</b> (+100 BYN)"
         ),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -411,7 +411,7 @@ async def process_urgent_choice(update: Update, context: ContextTypes.DEFAULT_TY
         f"🖨 <b>Тип:</b> {context.user_data['print_type']}\n"
         f"📐 <b>Размер:</b> {context.user_data['size']}\n"
         f"⏰ <b>Дедлайн:</b> {deadline_str}\n"
-        f"🚀 <b>Ускоренный:</b> {'Да (+100 ₽)' if is_urgent else 'Нет'}\n"
+        f"🚀 <b>Ускоренный:</b> {'Да (+100 BYN)' if is_urgent else 'Нет'}\n"
         f"{'━' * 30}\n"
         f"✅ Заявка отправлена на рассмотрение!\n"
         f"Ожидай уведомления о статусе.\n\n"
@@ -440,7 +440,6 @@ async def process_urgent_choice(update: Update, context: ContextTypes.DEFAULT_TY
     # Показываем меню заказчику снова
     await context.bot.send_message(
         chat_id=update.effective_user.id,
-        text="Что дальше?",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
