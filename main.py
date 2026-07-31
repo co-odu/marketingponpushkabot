@@ -167,7 +167,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
-        "Я бот для подачи заявок в отдел маркетинга компании PON-PUSHKA.",
+        "Это бот компании PON-PUSHKA для заказа макетов — баннеров, вывесок, диджитал-рекламы и другой печатной/цифровой продукции для ваших объектов.
+Больше не нужно писать в чат и ждать ответа менеджера — заявка подаётся прямо в отдел маркетинга за пару минут, а статус всегда видно в самом боте.",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -216,7 +217,7 @@ async def prompt_work_format(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -
         text=(
             f"📝 <b>Шаг 3 из {TOTAL_STEPS}</b>\n"
             "Какой <b>формат работ</b> тебе нужен?\n"
-            "<i>Например: баннер, наклейка, логотип, обновление сайта...</i>"
+            "<i>Например: баннер, наклейка, логотип, обновление тв, и т.д....</i>"
         ),
         parse_mode="HTML",
         reply_markup=BACK_KEYBOARD,
