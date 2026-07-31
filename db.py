@@ -20,7 +20,7 @@ def get_conn():
 
 
 def init_db() -> None:
-    """Создаёт таблицы, если их ещё нет"""
+    """Создаёт таблицы, если их ещё нет, и докатывает миграции для старых БД"""
     with get_conn() as conn:
         conn.execute(
             """
@@ -32,6 +32,7 @@ def init_db() -> None:
                 company         TEXT,
                 object          TEXT,
                 task_date       TEXT,
+                work_format     TEXT,
                 tech_task       TEXT,
                 print_type      TEXT,
                 size            TEXT,
@@ -43,6 +44,11 @@ def init_db() -> None:
             )
             """
         )
+        # Миграция для БД, созданных до появления поля work_format
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(requests)")}
+        if "work_format" not in existing_columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN work_format TEXT")
+
         # Заявка теперь может быть отправлена НЕСКОЛЬКИМ админам одновременно —
         # тут храним по одной строке на каждое такое сообщение, чтобы потом
         # можно было обновить/отредактировать все разом.
@@ -64,20 +70,20 @@ def create_request(
     company: str,
     object_: str,
     task_date: datetime,
+    work_format: str,
     tech_task: str,
     print_type: str,
     size: str,
     deadline_str: str,
-    is_urgent: bool,
 ) -> None:
     with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO requests (
                 request_id, user_id, status, reason,
-                company, object, task_date, tech_task, print_type, size,
+                company, object, task_date, work_format, tech_task, print_type, size,
                 deadline_str, is_urgent, admin_chat_id, admin_message_id, created_at
-            ) VALUES (?, ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            ) VALUES (?, ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?)
             """,
             (
                 request_id,
@@ -85,11 +91,11 @@ def create_request(
                 company,
                 object_,
                 task_date.isoformat(),
+                work_format,
                 tech_task,
                 print_type,
                 size,
                 deadline_str,
-                int(is_urgent),
                 datetime.now().isoformat(),
             ),
         )
